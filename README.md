@@ -490,4 +490,3 @@ Need help? Contact your Noibu solutions engineer with:
 - Android version
 - Initialization code snippet
 - Logcat output
-- App version
