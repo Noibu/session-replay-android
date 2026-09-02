@@ -1,5 +1,7 @@
 # Noibu Android SDK Guide
 
+[Android](https://central.sonatype.com/artifact/com.noibu.mobile.android/session-replay) · [Jetpack Compose](https://central.sonatype.com/artifact/com.noibu.mobile.android/session-replay-compose)
+
 ## Table of Contents
 
 - [1. Requirements](#1-requirements)
@@ -32,32 +34,79 @@ Add the Noibu Session Replay SDK to your app module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.noibu.mobile.kmp:session-replay-android:1.0.0-alpha04")
+    implementation("com.noibu.mobile.android:session-replay:1.0.1")
 }
 ```
 
-Sync Gradle to download the artifacts.
+Jetpack Compose apps add the Compose add-on as well. It is published from this SDK's release tag
+and always carries the same version:
+
+```kotlin
+dependencies {
+    implementation("com.noibu.mobile.android:session-replay:1.0.1")
+    implementation("com.noibu.mobile.android:session-replay-compose:1.0.1")
+}
+```
+
+Fragment/XML-only apps depend on `session-replay` alone and never pull Compose.
+
+Sync Gradle to download the artifacts. See the [changelog](CHANGELOG.md) for what changed in this
+release.
 
 ---
 
 ## 3. Configuration
 
-### NoibuSessionReplayConfig
+### SessionReplayConfig
 
-The SDK is configured via `NoibuSessionReplayConfig`. All parameters:
+The SDK is configured via `SessionReplayConfig`. All parameters:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `domain` | `String` | **Yes** | - | Your Noibu domain endpoint (provided by Noibu) |
-| `privacyMode` | `PrivacyMode` | No | `MASK_SENSITIVE` | Privacy level for session recording |
+| `privacyMode` | `PrivacyMode` | No | `MASK_SENSITIVE` | How much displayed text reaches the replay (see [Privacy](#privacy)). |
+| `logLevel` | `LogLevel?` | No | `null` | Diagnostic log verbosity. Leave unset for the default (silent in release builds). See [Diagnostic Logging](#diagnostic-logging). |
+| `trackTouches` | `Boolean` | No | `true` | Capture clicks and scrolls (with DXA selectors). |
+| `trackKeyboard` | `Boolean` | No | `true` | Capture keyboard-focus events — which field the user typed in, never the typed text. |
+| `trackNetwork` | `Boolean` | No | `true` | Capture HTTP events. Off drops them SDK-wide even with the interceptor installed — a kill switch that needs no OkHttp change. |
+| `trackWebViews` | `Boolean` | No | `true` | Allow webview capture. Off makes `WebViewTracking.enable()` a no-op SDK-wide. |
+| `trackErrors` | `Boolean` | No | `true` | Capture uncaught exceptions (always chains to an existing handler). |
+| `autoTrackNavigation` | `Boolean` | No | `false` | Open a page per resumed Activity/Fragment, with no per-screen calls. Don't combine with explicit navigation wiring — explicit wiring wins and silences the automatic boundaries. |
 
-### Privacy Modes
+### Privacy
+
+The mode controls how much **displayed** text (labels, button titles, field hints) reaches the replay.
+What the user **types** is never captured in any mode — a field surfaces its hint, or `***`.
 
 | Mode | Description |
 |------|-------------|
-| `PrivacyMode.ALLOW_ALL` | All content is visible in recordings |
-| `PrivacyMode.MASK_SENSITIVE` | Masks passwords, credit card fields, and other sensitive inputs |
-| `PrivacyMode.MASK_ALL` | Masks all text content |
+| `PrivacyMode.ALLOW_ALL` | Displayed text is captured verbatim — nothing is redacted |
+| `PrivacyMode.MASK_SENSITIVE` | Default. Displayed text is captured, with card / SSN / email / phone spans redacted in place — including PII rendered as a plain label, which input masking never sees |
+| `PrivacyMode.MASK_ALL` | No readable text at all: every string becomes `xxxx`, keeping only its word/length shape |
+
+The mode applies to both the View and Compose walkers, and is shared with the iOS and Flutter SDKs
+(`com.noibu.mobile.core.privacy.TextMasking` in the KMP core owns the policy).
+
+### Diagnostic Logging
+
+The SDK can print diagnostic logs to Logcat (tag `NoibuMobile`) to help debug an integration. Control verbosity with `logLevel`:
+
+| Level | What it logs |
+|-------|--------------|
+| `LogLevel.NONE` | Nothing |
+| `LogLevel.ERROR` | Failures (send / connect / persist) |
+| `LogLevel.WARNING` | Recoverable issues (discarded data, missing assets) plus errors |
+| `LogLevel.INFO` | **Recommended for debugging** — lifecycle milestones (init, page recording, data sends, background sync) plus warnings and errors |
+| `LogLevel.DEBUG` / `LogLevel.VERBOSE` | Internal Noibu diagnostics; high volume, intended for Noibu support |
+
+```kotlin
+val config = SessionReplayConfig(
+    domain = "your-domain.noibu.com",
+    logLevel = LogLevel.INFO
+)
+```
+
+Logging is **off by default** — leave `logLevel` unset and the SDK logs nothing. Set a level to opt in.
 
 ---
 
@@ -69,20 +118,20 @@ Create or update your `Application` class to initialize the SDK as early as poss
 
 ```kotlin
 import android.app.Application
-import com.noibu.mobile.kmp.sessionreplay.NoibuSessionReplay
-import com.noibu.mobile.kmp.sessionreplay.NoibuSessionReplayConfig
-import com.noibu.mobile.kmp.sessionreplay.PrivacyMode
+import com.noibu.mobile.sessionreplay.SessionReplaySDK
+import com.noibu.mobile.sessionreplay.SessionReplayConfig
+import com.noibu.mobile.sessionreplay.PrivacyMode
 
 class MyApplication : Application() {
     override fun onCreate() {
         super.onCreate()
 
-        val config = NoibuSessionReplayConfig(
+        val config = SessionReplayConfig(
             domain = "your-domain.noibu.com",
             privacyMode = PrivacyMode.MASK_SENSITIVE
         )
 
-        NoibuSessionReplay.initialize(
+        SessionReplaySDK.initialize(
             context = this,
             config = config
         )
@@ -92,35 +141,21 @@ class MyApplication : Application() {
 
 ### Jetpack Compose Setup
 
-For Compose applications, add the `NoibuComposeExtension` to enable proper gesture tracking:
+Compose applications pass `NoibuComposeExtension` (from the `session-replay-compose` add-on) so the
+SDK captures the Compose tree as well as the View tree:
 
 ```kotlin
-import com.noibu.mobile.kmp.sessionreplay.NoibuComposeExtension
+import com.noibu.mobile.sessionreplay.compose.NoibuComposeExtension
 
-NoibuSessionReplay.initialize(
+SessionReplaySDK.initialize(
     context = this,
     config = config,
     extensions = listOf(NoibuComposeExtension())
 )
 ```
 
-### Material Design Support
-
-For apps using Material Design components, add the `NoibuMaterialExtension`:
-
-```kotlin
-import com.noibu.mobile.kmp.sessionreplay.NoibuComposeExtension
-import com.noibu.mobile.kmp.sessionreplay.NoibuMaterialExtension
-
-NoibuSessionReplay.initialize(
-    context = this,
-    config = config,
-    extensions = listOf(
-        NoibuComposeExtension(),
-        NoibuMaterialExtension()
-    )
-)
-```
+An app that initializes with this extension is reported as a Compose app in Noibu, so its sessions
+are distinguishable from a Fragment/XML app's.
 
 ### Register Your Application
 
@@ -137,23 +172,47 @@ Ensure your Application class is declared in `AndroidManifest.xml`:
 
 ## 5. Page Navigation
 
-### Automatic Tracking
+Pick one of the three below — they are alternatives, not layers. Explicit wiring (the composable or
+`trackNavigation`) wins and silences the automatic boundaries.
 
-The SDK automatically tracks Activity-based navigation. For Compose apps with `NoibuComposeExtension`, navigation destinations are tracked automatically.
+### Jetpack Navigation (Compose)
+
+Drop the `NoibuNavigationTracking` composable into the scope that hosts your `NavHost`; every page
+boundary is derived from the `NavController`, with no per-screen calls:
+
+```kotlin
+import com.noibu.mobile.sessionreplay.compose.NoibuNavigationTracking
+
+val navController = rememberNavController()
+
+NoibuNavigationTracking(navController)
+
+NavHost(navController = navController, startDestination = "home") {
+    // ...
+}
+```
+
+A destination's page name defaults to its route; pass a `pageName` lambda to map it yourself.
+
+### Automatic Activity/Fragment Tracking
+
+Activity/Fragment apps can opt into a page per resumed screen with `autoTrackNavigation = true` in
+the config, instead of calling anything per screen.
 
 ### Manual Page Tracking
 
-For custom navigation flows or single-Activity architectures, call `didNavigate()` when the user navigates to a new screen:
+For custom navigation flows or single-Activity architectures, call `trackNavigation()` from the
+newly-shown screen (e.g. each `Fragment.onResume`):
 
 ```kotlin
 // With a page name
-NoibuSessionReplay.didNavigate("ProductDetails")
+SessionReplaySDK.trackNavigation("ProductDetails")
 
-// Without a page name (uses default)
-NoibuSessionReplay.didNavigate()
+// Without a page name (uses the default)
+SessionReplaySDK.trackNavigation()
 ```
 
-**When to call `didNavigate()`:**
+**When to call `trackNavigation()`:**
 - Navigation to a new screen in a single-Activity app
 - Modal or bottom sheet presentations
 - Tab switches that represent distinct pages
@@ -175,10 +234,10 @@ Report errors to Noibu for tracking and analysis. Errors are associated with the
 
 ```kotlin
 // With a message only
-NoibuSessionReplay.addError("Payment processing failed")
+SessionReplaySDK.addError("Payment processing failed")
 
 // With a message and stack trace
-NoibuSessionReplay.addError(
+SessionReplaySDK.addError(
     message = "Payment processing failed",
     stack = "at com.myapp.checkout.PaymentProcessor.process(PaymentProcessor.kt:42)"
 )
@@ -190,7 +249,7 @@ NoibuSessionReplay.addError(
 try {
     riskyOperation()
 } catch (e: Exception) {
-    NoibuSessionReplay.addError(e)
+    SessionReplaySDK.addError(e)
 }
 ```
 
@@ -200,10 +259,10 @@ The Throwable overload automatically extracts the message and stack trace.
 
 | Method | Parameters | Description |
 |--------|-----------|-------------|
-| `addError(message, stack?, attributes?)` | `message: String`, `stack: String?`, `attributes: Map<String, String>` | Report a custom error with an optional stack trace |
-| `addError(throwable, attributes?)` | `throwable: Throwable`, `attributes: Map<String, String>` | Report an error from a caught exception |
+| `addError(message, stack?)` | `message: String`, `stack: String? = null` | Report a custom error with an optional stack trace |
+| `addError(throwable)` | `throwable: Throwable` | Report an error from a caught exception |
 
-> **Note**: The `attributes` parameter is reserved for future use.
+> **Note**: Up to 500 errors are reported per page visit; the count resets on the next page visit.
 
 ---
 
@@ -216,10 +275,10 @@ The SDK provides an OkHttp interceptor to automatically capture HTTP request and
 Add the Noibu interceptor to your `OkHttpClient`:
 
 ```kotlin
-import com.noibu.mobile.kmp.sessionreplay.installNoibuNetworkInstrumentation
+import com.noibu.mobile.sessionreplay.api.installNetworkInstrumentation
 
 val client = OkHttpClient.Builder()
-    .installNoibuNetworkInstrumentation()
+    .installNetworkInstrumentation()
     .build()
 ```
 
@@ -233,21 +292,31 @@ val client = OkHttpClient.Builder()
 | Request/response bodies | Text-based content types only (JSON, XML, form data), up to 64KB |
 | Errors | Network failures and exceptions |
 
+WebSocket connections are not reported as requests — a WebSocket has no response to record and stays
+open long after it opens, and a socket that reconnects would report a failed request for every
+attempt. The interceptor is also safe to install before `SessionReplaySDK.initialize`, and to leave
+in place after `shutdown()`: it passes a request straight through, without reading headers or bodies,
+while capture is off or `trackNetwork` is off.
+
 ### Privacy
 
 The following headers are automatically redacted:
 
 `authorization`, `cookie`, `set-cookie`, `x-auth-token`, `x-api-key`, `proxy-authorization`, `x-forwarded-for`
 
+Bodies and the remaining header values are PII-redacted before they reach the device cache: JSON
+values under sensitive key names (`password`, `email`, `cardNumber`, `address`, …) are replaced
+with `******`, then credit-card, email, SSN/SIN and phone patterns are scrubbed from the text.
+
 ### Advanced Configuration
 
-You can disable raw HTTP body/header capture by using `NoibuNetworkInterceptor` directly:
+You can disable raw HTTP body/header capture by using `NetworkInterceptor` directly:
 
 ```kotlin
-import com.noibu.mobile.kmp.sessionreplay.NoibuNetworkInterceptor
+import com.noibu.mobile.sessionreplay.api.NetworkInterceptor
 
 val client = OkHttpClient.Builder()
-    .addInterceptor(NoibuNetworkInterceptor(captureHttpData = false))
+    .addInterceptor(NetworkInterceptor(captureHttpData = false))
     .build()
 ```
 
@@ -265,16 +334,16 @@ The Noibu SDK can capture session replay data from WebViews, rendering webview c
 
 ### Setup
 
-Call `NoibuWebViewTracking.enable()` after creating your WebView:
+Call `WebViewTracking.enable()` after creating your WebView:
 
 ```kotlin
 import android.webkit.WebView
-import com.noibu.mobile.sessionreplay.api.NoibuWebViewTracking
+import com.noibu.mobile.sessionreplay.api.WebViewTracking
 
 val webView: WebView = findViewById(R.id.webview)
 webView.settings.javaScriptEnabled = true
 
-NoibuWebViewTracking.enable(webView)
+WebViewTracking.enable(webView)
 ```
 
 ### Jetpack Compose
@@ -285,7 +354,7 @@ For Compose apps, use `AndroidView` to host the WebView:
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.ui.viewinterop.AndroidView
-import com.noibu.mobile.sessionreplay.api.NoibuWebViewTracking
+import com.noibu.mobile.sessionreplay.api.WebViewTracking
 
 AndroidView(
     factory = { context ->
@@ -294,7 +363,7 @@ AndroidView(
             settings.domStorageEnabled = true
             webViewClient = WebViewClient()
 
-            NoibuWebViewTracking.enable(this)
+            WebViewTracking.enable(this)
 
             loadUrl("https://example.com")
         }
@@ -314,13 +383,21 @@ AndroidView(
 2. DOM snapshots and mutations are captured and routed through a native bridge
 3. Replay records are enriched with a `slotId` that links them to the native WebView container
 4. Records are written directly to the replay outbox and sent alongside native snapshots
+5. Input values are masked in replay, and a click on a field reports its label rather than its
+   contents — the same rule the native view walker applies to a text field
+
+### Stopping Capture
+
+`WebViewTracking.disable(webView)` stops capture for one WebView. To turn webview capture off for
+the whole app, set `trackWebViews = false` in the config — `enable()` then becomes a no-op and
+nothing is injected into any webview.
 
 ### Important Notes
 
 - Call `enable()` **before** loading any URL in the WebView
-- Call `enable()` **after** `NoibuSessionReplay.initialize()` — the SDK must be running
+- Call `enable()` **after** `SessionReplaySDK.initialize()` — the SDK must be running
 - Each WebView instance gets a unique `slotId` so multiple WebViews in the same screen are tracked independently
-- WebView replay data is associated with the current native page view — call `didNavigate()` before presenting a new screen with a WebView
+- WebView replay data is associated with the current native page view — report the navigation before presenting a new screen with a WebView
 
 ---
 
@@ -331,7 +408,7 @@ For Jetpack Compose apps, use the `noibuTag` modifier to add semantic identifier
 ### Usage
 
 ```kotlin
-import com.noibu.mobile.kmp.sessionreplay.noibuTag
+import com.noibu.mobile.sessionreplay.compose.noibuTag
 
 Button(
     onClick = { /* ... */ },
@@ -346,7 +423,7 @@ Button(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `name` | `String` | - | Semantic identifier for the UI element |
-| `isImage` | `Boolean` | `false` | Set to `true` if the element represents an image |
+| `isImage` | `Boolean` | `false` | Kept for source compatibility with earlier releases; unused |
 
 ### Automatic Tagging
 
@@ -361,9 +438,9 @@ Add metadata to sessions for filtering and analysis in the Noibu dashboard.
 ### Adding Attributes
 
 ```kotlin
-NoibuSessionReplay.addCustomAttribute("customerId", "12345")
-NoibuSessionReplay.addCustomAttribute("orderId", "ORD-98765")
-NoibuSessionReplay.addCustomAttribute("appVersion", "2.1.0")
+SessionReplaySDK.addCustomAttribute("customerId", "12345")
+SessionReplaySDK.addCustomAttribute("orderId", "ORD-98765")
+SessionReplaySDK.addCustomAttribute("appVersion", "2.1.0")
 ```
 
 ### Validation Rules
@@ -375,39 +452,8 @@ NoibuSessionReplay.addCustomAttribute("appVersion", "2.1.0")
 | Attribute value length | 1-50 characters |
 | Duplicate names | Not allowed |
 
-### Return Values
-
-The `addCustomAttribute()` method returns a `CustomAttributeResult`:
-
-| Result | Description |
-|--------|-------------|
-| `SUCCESS` | Attribute added successfully |
-| `TOO_MANY_IDS_ADDED` | Maximum of 10 attributes reached |
-| `ID_NAME_ALREADY_ADDED` | Attribute with this name already exists |
-| `NAME_TOO_LONG` | Name exceeds 50 characters |
-| `VALUE_TOO_LONG` | Value exceeds 50 characters |
-| `INVALID_NAME_TYPE` | Name is not a valid string type |
-| `INVALID_VALUE_TYPE` | Value is not a valid string type |
-| `NAME_HAS_NO_LENGTH` | Name is empty |
-| `VALUE_HAS_NO_LENGTH` | Value is empty |
-| `NOT_INITIALIZED` | SDK not initialized |
-
-### Example with Error Handling
-
-```kotlin
-val result = NoibuSessionReplay.addCustomAttribute("customerId", customerId)
-when (result) {
-    CustomAttributeResult.SUCCESS -> {
-        // Attribute added successfully
-    }
-    CustomAttributeResult.TOO_MANY_IDS_ADDED -> {
-        Log.w("Noibu", "Maximum custom attributes reached")
-    }
-    else -> {
-        Log.w("Noibu", "Failed to add attribute: ${result.message}")
-    }
-}
-```
+`addCustomAttribute()` is fire-and-forget and returns `Unit`. Attributes that violate these rules
+are ignored; validate in application code if the caller needs immediate feedback.
 
 ---
 
@@ -415,18 +461,19 @@ when (result) {
 
 ### Privacy Mode Selection
 
-Choose the appropriate privacy mode based on your app's requirements:
-
 ```kotlin
-// For general apps - masks only sensitive fields (default)
+// card / SSN / email / phone spans redacted in displayed text — default
 privacyMode = PrivacyMode.MASK_SENSITIVE
 
-// For apps handling highly sensitive data
+// no readable text at all — every string keeps only its word/length shape
 privacyMode = PrivacyMode.MASK_ALL
 
-// For internal/debug builds only
+// displayed text verbatim
 privacyMode = PrivacyMode.ALLOW_ALL
 ```
+
+Typed input content never reaches the pipeline in any mode: the walker replaces it with the field's
+hint (or `***`) as it walks, before an event is built. `MASK_ALL` additionally masks the hint.
 
 ### Data Storage
 
@@ -444,12 +491,20 @@ The SDK automatically handles app lifecycle:
 - **App goes to background**: Pending data is flushed
 - **App returns after 30+ seconds**: A new page view is started automatically
 
+### Checking Initialization Status
+
+```kotlin
+if (SessionReplaySDK.isInitialized) {
+    Log.d("Noibu", "Noibu SDK is running")
+}
+```
+
 ### Shutdown
 
 To completely stop the SDK (e.g., user revokes consent):
 
 ```kotlin
-NoibuSessionReplay.shutdown()
+SessionReplaySDK.shutdown()
 ```
 
 This will:
@@ -476,10 +531,12 @@ adb logcat | grep -i noibu
 | Issue | Solution |
 |-------|----------|
 | No recordings appearing | Verify `domain` is correct |
-| Compose gestures not tracked | Ensure `NoibuComposeExtension` is added |
-| Network requests not captured | Ensure `installNoibuNetworkInstrumentation()` is called on your `OkHttpClient.Builder` |
+| Need detail when debugging an integration | Set `logLevel = LogLevel.INFO` in the config, then `adb logcat | grep -i noibu` (see [Diagnostic Logging](#diagnostic-logging)) |
+| Compose screens not captured | Ensure the `session-replay-compose` dependency is added and `NoibuComposeExtension` is passed to `initialize()` |
+| Network requests not captured | Ensure `installNetworkInstrumentation()` is called on your `OkHttpClient.Builder` |
 | Errors not appearing | Verify `addError()` is called after `initialize()` |
-| WebView content not in replay | Ensure the web page includes the Noibu browser snippet with session replay enabled, and that the host is in `allowedHosts` |
+| Pages not splitting | Wire exactly one navigation source — `NoibuNavigationTracking`, `autoTrackNavigation = true`, or `trackNavigation()` (see [Page Navigation](#5-page-navigation)) |
+| WebView content not in replay | Verify `WebViewTracking.enable()` runs after `initialize()` and before the URL loads, and that `trackWebViews` is left on |
 
 ---
 
