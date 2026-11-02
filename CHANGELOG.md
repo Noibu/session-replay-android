@@ -5,6 +5,175 @@ All notable changes to the **Noibu Session Replay Android SDK** are documented i
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-11-02
+
+### Added
+- **Page titles: `trackNavigation(screenName, attributes, title)`.** An optional `title` is what Noibu
+  shows for the page (e.g. the product's name on a product page); without one, the screen name is the
+  title. Existing two-argument calls keep working.
+- **Device language** is reported with every page.
+
+### Fixed
+- **Taps replay on the element that was tapped**, not on the page as a whole.
+- **Drags replay as finger movement**, so a scroll or swipe shows where the finger went.
+- **Nothing lingers on screen after a scroll.** Once a screen had scrolled, anything that disappeared
+  while still in view stayed drawn in the replay: the text cursor at every position it had been, a
+  closed menu or picker, a dismissed message. It now leaves the replay when it leaves the screen.
+
+## [2.0.0] - 2026-10-26
+
+### BREAKING
+- **Pages now come exclusively from `trackNavigation` calls.** Automatic screen and WebView route
+  detection is removed: no Activity, Fragment, navigation destination or webview navigation opens a page.
+- **One navigation API: `trackNavigation(screenName, attributes)`.** Call it from every screen (e.g.
+  `Fragment.onResume`, a Compose destination's `LaunchedEffect`), including when Back reveals it.
+- **Automatic page reporting removed.** The SDK no longer opens a page per resumed Activity/Fragment
+  (`SessionReplayConfig.autoTrackNavigation` is gone), and the Compose add-on's
+  `NoibuNavigationTracking` only handles transitions. Apps that relied on automatic tracking must now
+  call `trackNavigation` on every page.
+- **WebViews open no pages.** A navigation inside a tracked webview no longer opens a page visit named
+  after its URL; its replay, clicks, errors and requests land on the current page. Report web steps with
+  `trackNavigation` (see [Web steps as pages](README.md#web-steps-as-pages)).
+- **Deprecated APIs removed:** `SessionReplaySDK.trackNavigation(pageName)` and the
+  `trackNavigation()` no-argument form.
+- **Unnamed or blank calls report nothing.** A blank `screenName` opens no page.
+- **Navigation-transition hooks are internal.** `captureAfterTransition()`, `beginNavigationTransition()`
+  and `monitors.NavigationTransitions` are marked `@NoibuInternalApi` (opt-in required, error level):
+  they serve Noibu's Compose add-on and React Native bridge, and app code calling them no longer
+  compiles. Use `trackNavigation` and `NoibuNavigationTracking`.
+- **Pages without a `trackNavigation` call.** On a fresh start (no previous screen), events land on a
+  `view/<uuid>` placeholder that the first screen takes over (within 2 s, or before any replay frame);
+  on a return from background, a relaunch or a new session, the next page copies the previous screen's
+  name, group and attributes; an app that never calls it gets `view/<uuid>` pages. See
+  [What happens without a call](README.md#what-happens-without-a-call).
+
+See [Migrating from 1.x](README.md#migrating-from-1x).
+
+### Added
+- **Screen names and attributes.** `trackNavigation(screenName, attributes)` reports a page by its template
+  name (`Product Detail`, `Cart`), which is also its page group, with attributes for what varies
+  (`productId`); the same name with different attributes is a new visit. See [Pages](README.md#5-pages-tracknavigation).
+- **`pageType` attribute.** A standard type (`PageType` constants, any case) is the page group instead of
+  the screen name. Reserved names (`None`, `Page Check`, `Exit`…) are never sent as a group.
+- **Page groups** in page analysis: every page is grouped by its screen name or `pageType`.
+- **`onRouteChange` on `WebViewTracking.enable`.** Called with the route's `path?query` each time the
+  page inside a tracked WebView moves to a different route, so the app can report web steps with
+  `trackNavigation` (see [Web steps as pages](README.md#web-steps-as-pages)). The document the webview
+  loads first is not passed to it: the hosting screen reports that one with its own `path`.
+
+### Removed
+- `SessionReplayConfig.autoTrackNavigation` and the automatic page per resumed Activity/Fragment.
+- `SessionReplaySDK.trackNavigation(pageName)`.
+
+### Fixed
+- **Elevation shadows replay as light as the device draws them.** Each was Material's web shadow set,
+  several times darker, and was drawn for views that cast none: the platform scales a shadow by its
+  outline's alpha, and a transparent background casts nothing. Shadows are now the platform's own: an
+  ambient and a spot layer at the theme's `ambientShadowAlpha`/`spotShadowAlpha`, offset by the view's
+  place under the light, in its shadow colours. Screens of cards and a raised tab bar replayed heavy.
+- **Minified apps no longer crash at launch.** WorkManager's Room database is built by reflection on
+  a constructor Room <2.7 does not keep; R8 full mode stripped it. The SDK's consumer rules keep it.
+- **Minified apps keep Material backgrounds, Compose interop and keyboard capture.** The names the
+  walker reads by reflection (Material shape drawables, Compose's AndroidView holders and semantics)
+  are now kept by the SDK's consumer rules.
+- **An AndroidView paints with the composable that holds it.** It was emitted above every Compose
+  node, so a native view inside a screen sliding over another floated above both.
+- **A screen sliding over another replays as a slide, not a scroll.** Children moving together under a
+  node that cannot scroll (an inner navigation the app does not report, a pager) were read as that node
+  scrolling: the screen sliding out was kept as an off-screen ghost and the move replayed as a scroll.
+  Only a node the walker marks scrollable scrolls now, and rows a pixel apart from float rounding no
+  longer make a list's scroll frame read as none.
+- **Sessions end after 29 minutes without input.** A page visit stayed open for as long as the process
+  lived when the app was never told it went to the background (launched straight into it, or
+  suspended before the lifecycle callback ran), so a visit hours later continued it. Now, as on the
+  web, 29 minutes with no tap, scroll, keystroke or navigation ends the session and seals its pages;
+  the next input starts a new session on a new page visit. Animations and network traffic don't count
+  as activity.
+- **Replay survives a crash or a kill.** The server stores a screen's replay only when its
+  connection closes; a long screen's connection is now checkpointed every 2 minutes, so a process that
+  dies with it open loses at most the last 2 minutes instead of the whole screen.
+- **The first replay frame of a screen is always its snapshot**, also when a tap opens the screen.
+- **Visits stay in order after a quick background.** A request begun on one screen and answered after
+  the app left it was filed to the next visit with its start time, so that visit started before the
+  one it followed and the two traded places (and referrers) in the timeline.
+
+## [1.2.0]
+
+### Added
+- **Custom tab bars in page analysis.** A bottom bar is recognised by its class name
+  (`…TabBar…`, `…BottomNavigation…`, `…NavigationBar…`, `…BottomAppBar…`) or by a role an add-on
+  supplies through `SessionReplaySDK.registerRoleHintResolver` (React Native does this for
+  `accessibilityRole="tablist"`). Scroll containers are marked by type (`ScrollView`,
+  `NestedScrollView`, list views, `HorizontalScrollView`), not only once their content outsizes them.
+
+### Fixed
+- **Large images keep their place while recording.** Capturing an image for replay re-sized the
+  app's own drawable to at most 1024×1024 px and never set it back, so an image box larger than that —
+  a full-width hero, a splash — was drawn squeezed into its top-left corner until the next layout. The
+  image is now rendered for replay without touching what the app draws, and the replayed image keeps
+  its proportions instead of being squashed. Every React Native `<Image>` was exposed; an `ImageView`
+  holding a plain `BitmapDrawable` was not.
+- **Page analysis: each visit names the screen it came from.** The referrer is recorded when the page
+  opens, so a visit whose predecessor had already been sent no longer arrives without one.
+- **Page analysis: a tap on empty space no longer lights up the whole page.** A tap between rows, on a
+  large unlabelled container, keys to the nearest content-sized element instead of a page-sized one.
+- **No blank page visit at launch.** Work that runs before the first screen names itself (a network
+  call at startup) no longer opens a visit of its own; the first screen adopts it.
+- **Tap heat shows on Compose screens.** Compose's interop-view holders no longer cover the screen in
+  replay, so taps resolve to the composables under them.
+- **Tinted backgrounds replay.** A background coloured only by `backgroundTint` (a `MaterialButton` in
+  an R8-minified app) keeps its fill and corners.
+- **Page analysis: click selectors are resolved at the tap.** The tapped element is looked up when the finger lifts, against what is on screen then, instead of when the pipeline drains seconds later — a tap followed by a scroll was attributed to whatever had moved under that point.
+- **Page analysis: scroll and tab-bar markers follow the screen.** A list that only becomes scrollable once its content loads, or a bar that settles into place after a transition, is re-marked instead of keeping the state of the first frame; nested Material bars pin once. A node's
+  selector class follows its key as siblings come and go, so a click always finds its element.
+- **Text replays at its real size and in place.** Every size and position was truncated to a whole
+  pixel, so text replayed up to a pixel small and every view up to a pixel up and to the left; they are
+  now rounded.
+- **Material Components views replay.** A `MaterialButton`, `MaterialCardView` or `Chip` draws through
+  Material's own shape drawable, which replay did not read: the button replayed blank. Its fill (including
+  `backgroundTint`), stroke and corners now replay.
+- **Gradients, elevation and letter spacing replay.** A `GradientDrawable` gradient, a view's elevation
+  shadow and a `TextView`'s letter spacing were dropped, and a face's weight was only ever sent as
+  regular or bold.
+- **Bundled fonts replay in their own face.** Fonts generated into `res/font` at build time, and fonts
+  loaded from `assets/`, replayed in a fallback font.
+- **A repeated view id no longer stalls replay processing.** `identityHashCode` is not unique; a view
+  tree that repeated an id could leave replay processing walking a loop on a background thread. It now
+  repairs any such tree, and its per-capture work stays proportional to the screen.
+- **Views inside a bordered view sit where they are drawn**, and **fonts are on the first frame of a
+  screen** (both shared with the iOS SDK's `1.1.3`). Nothing changes in an app and there is nothing to
+  configure.
+- **Webview HTTP calls are reported with absolute URLs.** A page's fetch or XHR to a relative URL
+  was reported as written, and the backend dropped the whole session it could not parse.
+
+## [1.1.0]
+
+### Added
+- **`track(name, data)` — ecommerce and custom events.** The counterpart of NoibuJS's
+  `track(name, payload)`: report a standard ecommerce event (`product_viewed`,
+  `product_added_to_cart`, `cart_viewed`, `checkout_started`, `checkout_completed`, …) or any custom
+  event with a JSON payload, and it appears on the session's timeline and in Explorations exactly as
+  the web event does. Standard payloads are checked against the shared ecommerce schema (unknown
+  properties are dropped, type mismatches rejected); a custom payload only has to be a JSON object.
+  Event names are capped at 500 characters and payloads at 10,000 characters serialized — the
+  payload cap also applies to standard events, which web leaves to its schema — and up to 500 events
+  are kept per page visit. The call never throws: it answers a `TrackResult` with `success` and the
+  validation `errors`, in the same words as web. `trackJson(name, dataJson)` takes an already-encoded
+  payload.
+  Called off the main thread, `track` is ordered behind a `trackNavigation` already on its way
+  there, so an event tracked as a screen appears lands on that screen's page visit.
+- **Events tracked during a navigation transition land on the page being entered.** With the
+  Compose add-on, the page boundary is reported once the new destination is RESUMED, after a
+  `LaunchedEffect` on that screen has already run — so a `track("product_viewed")` there used to be
+  attributed to the page being left. The core now holds events tracked between the transition start
+  and the boundary (up to three seconds) and attributes them to the page the boundary opens. Apps
+  using `autoTrackNavigation` with Fragments still see the boundary on `onFragmentResumed`; fire
+  screen-view events from `onResume` via `view.post { }` (or call `trackNavigation` yourself).
+- **`NoibuSdkContract`.** The public surface every Noibu mobile SDK exposes (`isInitialized`,
+  `shutdown`, `trackNavigation`, `addCustomAttribute`, `addError`, `trackJson`), which
+  `SessionReplaySDK` implements. Nothing changes for an app; the interface exists so the SDKs cannot
+  drift apart.
+
 ## [1.0.1]
 
 ### Fixed

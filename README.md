@@ -6,14 +6,16 @@
 
 - [1. Requirements](#1-requirements)
 - [2. Installation](#2-installation)
+- [2b. Gradle Plugin (optional)](#2b-gradle-plugin-optional)
 - [3. Configuration](#3-configuration)
 - [4. Initialization](#4-initialization)
-- [5. Page Navigation](#5-page-navigation)
+- [5. Pages (trackNavigation)](#5-pages-tracknavigation)
 - [6. Error Reporting](#6-error-reporting)
 - [7. Network Monitoring](#7-network-monitoring)
 - [8. WebView Support](#8-webview-support)
 - [9. View Tagging](#9-view-tagging)
 - [10. Custom Attributes](#10-custom-attributes)
+- [10b. Tracking Events](#10b-tracking-events)
 - [11. Privacy & Security](#11-privacy--security)
 - [12. Lifecycle Management](#12-lifecycle-management)
 
@@ -22,8 +24,8 @@
 ## 1. Requirements
 
 - **Minimum Android SDK**: API 26 (Android 8.0)
-- **Compile SDK**: 36
-- **Kotlin**: 2.0+
+- **Compile SDK**: 36 or higher
+- **Kotlin**: 2.1+ — the SDK is built with Kotlin 2.2, and a Kotlin plugin older than 2.1 cannot read its metadata (the optional [Gradle plugin](#2b-gradle-plugin-optional)'s Compose compiler plugin is built against Kotlin 2.2.10)
 - **Gradle**: 8.0+
 
 ---
@@ -34,7 +36,7 @@ Add the Noibu Session Replay SDK to your app module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.noibu.mobile.android:session-replay:1.0.1")
+    implementation("com.noibu.mobile.android:session-replay:2.1.0")
 }
 ```
 
@@ -43,8 +45,8 @@ and always carries the same version:
 
 ```kotlin
 dependencies {
-    implementation("com.noibu.mobile.android:session-replay:1.0.1")
-    implementation("com.noibu.mobile.android:session-replay-compose:1.0.1")
+    implementation("com.noibu.mobile.android:session-replay:2.1.0")
+    implementation("com.noibu.mobile.android:session-replay-compose:2.1.0")
 }
 ```
 
@@ -52,6 +54,57 @@ Fragment/XML-only apps depend on `session-replay` alone and never pull Compose.
 
 Sync Gradle to download the artifacts. See the [changelog](CHANGELOG.md) for what changed in this
 release.
+
+### What the artifact brings
+
+- The AAR is self-contained: Noibu's shared core is merged into it. Add only the coordinates above —
+  never a separate core dependency.
+- OkHttp 4.12.0 is a transitive dependency (the network interceptor is built on it). Having it on the
+  classpath captures nothing by itself: see [Capture network requests](#capture-network-requests).
+- Nothing to configure for R8/ProGuard: the consumer rules the SDK needs ship inside the AAR.
+- From Java, call `SessionReplaySDK.INSTANCE.initialize(...)`, `SessionReplaySDK.INSTANCE.track(...)`
+  and so on; `WebViewTracking.enable(webView)` is the one entry point that is a plain static.
+
+---
+
+## 2b. Gradle Plugin (optional)
+
+The SDK works without any build plugin. The Noibu Gradle Plugin adds two build-time features:
+
+| Feature | Setting | Default | What it does |
+|---------|---------|---------|--------------|
+| Bundled-font capture | `enableFontCapture` | `true` | Generates a manifest of the fonts under `src/main/res/font` and `src/main/assets/fonts` so the replay renders your custom fonts. Without it, text in the replay falls back to a default font. |
+| Compose instrumentation | `enableComposeInstrumentation` | `false` | A Kotlin compiler plugin that tags clickable composables with their function name, as a last-resort selector for clickables that carry no text or `contentDescription` (see [Automatic Tagging](#automatic-tagging)). |
+
+The plugin is published to Maven Central (artifact `com.noibu.mobile.android:gradle-plugin`) and is
+built against Android Gradle Plugin 9.0, so it needs AGP 9.0 or newer. Gradle looks for plugins only
+in the Gradle Plugin Portal unless told otherwise, so add Maven Central in `settings.gradle.kts`:
+
+```kotlin
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+}
+```
+
+Then apply it in the app module:
+
+```kotlin
+plugins {
+    id("com.noibu.gradle.plugin") version "1.0.0"
+}
+
+noibu {
+    enableComposeInstrumentation = true   // Compose apps only
+    enableFontCapture = true
+}
+```
+
+XML and React Native apps that only want font capture can apply `com.noibu.gradle.fonts` (same version) instead —
+the same font manifest with no Compose compiler plugin.
 
 ---
 
@@ -71,7 +124,6 @@ The SDK is configured via `SessionReplayConfig`. All parameters:
 | `trackNetwork` | `Boolean` | No | `true` | Capture HTTP events. Off drops them SDK-wide even with the interceptor installed — a kill switch that needs no OkHttp change. |
 | `trackWebViews` | `Boolean` | No | `true` | Allow webview capture. Off makes `WebViewTracking.enable()` a no-op SDK-wide. |
 | `trackErrors` | `Boolean` | No | `true` | Capture uncaught exceptions (always chains to an existing handler). |
-| `autoTrackNavigation` | `Boolean` | No | `false` | Open a page per resumed Activity/Fragment, with no per-screen calls. Don't combine with explicit navigation wiring — explicit wiring wins and silences the automatic boundaries. |
 
 ### Privacy
 
@@ -139,6 +191,22 @@ class MyApplication : Application() {
 }
 ```
 
+### Capture network requests
+
+Unlike iOS, where HTTP capture starts with `initialize`, Android records only requests made through an
+`OkHttpClient` you instrument. Add the interceptor to every builder the app uses, including the ones
+your dependency-injection module hands to Retrofit:
+
+```kotlin
+val client = OkHttpClient.Builder()
+    .installNetworkInstrumentation()
+    .build()
+```
+
+Without it, sessions carry no HTTP data at all. Other HTTP stacks (Ktor's CIO or Android engines,
+Volley, Cronet, `HttpURLConnection`) are not captured; Ktor's OkHttp engine is, through
+`engine { addInterceptor(NetworkInterceptor()) }`. Details in [Network Monitoring](#7-network-monitoring).
+
 ### Jetpack Compose Setup
 
 Compose applications pass `NoibuComposeExtension` (from the `session-replay-compose` add-on) so the
@@ -157,6 +225,10 @@ SessionReplaySDK.initialize(
 An app that initializes with this extension is reported as a Compose app in Noibu, so its sessions
 are distinguishable from a Fragment/XML app's.
 
+`initialize()` is idempotent: a second call while the SDK is running is ignored, so re-running your
+startup code (a plugin framework re-mounting, for instance) never doubles capture. After `shutdown()`
+the next `initialize()` starts the SDK again.
+
 ### Register Your Application
 
 Ensure your Application class is declared in `AndroidManifest.xml`:
@@ -170,21 +242,95 @@ Ensure your Application class is declared in `AndroidManifest.xml`:
 
 ---
 
-## 5. Page Navigation
+<a id="5-page-navigation"></a>
 
-Pick one of the three below — they are alternatives, not layers. Explicit wiring (the composable or
-`trackNavigation`) wins and silences the automatic boundaries.
+## 5. Pages (trackNavigation)
+
+> **How pages work in 2.0**
+> - Pages are reported explicitly. The SDK no longer detects screens: no Activity, Fragment or
+>   navigation destination opens a page on its own.
+> - Call `trackNavigation(screenName, attributes, title)` for every page, including tabs, relevant
+>   modals and WebView steps (see [Web steps as pages](#web-steps-as-pages)).
+> - Track page groups, not individual views: `screenName` is the page group (`Product Detail`,
+>   `Checkout`), and attributes carry the variations (`productId`, `step`).
+> - Report every page entry, including Back.
+> - Repeating the same name and attributes continues the current visit; changing the attributes starts
+>   a new one.
+> - Navigation helpers (`NoibuNavigationTracking`) don't report pages; they only manage transitions.
+
+### Page groups
+
+**A screen name is a page group, not a view.** A *page* is everything the user experiences as one
+place in your app — not a single Activity, Fragment or composable. Page analysis, heatmaps and Journeys
+aggregate by screen name, so every view of that place reports the same one:
+
+- every product detail, its gallery, size picker and reviews sheet → `Product Detail`
+- every category or listing → `Product List`
+- the address, payment and review steps of checkout → `Checkout`
+
+| Think of it as… | Not as… |
+|---|---|
+| `Product Detail` (all product details) | `ProductDetailActivity`, `ProductDetailScreen` |
+| `Product List` (any listing) | `WomenTopsCategoryFragment` |
+| `Checkout` (all steps) | `CheckoutAddressScreen`, `CheckoutPaymentScreen` |
+
+### Reporting a page
+
+Call `trackNavigation()` from the newly shown screen — each `Fragment.onResume`, or a Compose
+destination's `LaunchedEffect`:
+
+```kotlin
+import com.noibu.mobile.sessionreplay.PageType
+
+SessionReplaySDK.trackNavigation(
+    screenName = "Product Detail",
+    attributes = mapOf("pageType" to PageType.PRODUCT, "category" to "Clothing", "productId" to "123"),
+    title = "Sport Backpack",
+)
+```
+
+- **`screenName`** — the page group the user is in (`Product Detail`, `Cart`, `Checkout`), shared by
+  every view of that place. Trimmed, and the page group is cut at 100 characters; a blank name reports
+  nothing.
+- **`attributes`** — what varies inside the page (`category`, `productId`, `step`…). The first 20 keys
+  of 1–50 characters; values are strings (cut at 200 characters), booleans, finite numbers or `null`.
+  Anything else is dropped, never thrown.
+- **`title`** (optional) — the page's human-readable title, what Noibu shows for it (the product's
+  name on a product page, say). Without one, the screen name is the title. Trimmed and cut at 1024
+  characters. The title does not identify the visit: a later call with the same name and attributes
+  continues the visit and keeps its first title, so pass the title on the call that opens the page.
+- **`pageType`** (optional attribute) — places the page in a standard ecommerce category:
+  `PageType.HOME`, `COLLECTION`, `SEARCH`, `PRODUCT`, `CART`, `CHECKOUT`, `LOGIN` (matched ignoring
+  case). Journeys groups and colours the page under that category; without it, the page is grouped by
+  its screen name. Only the exact key `pageType` is read: `pagetype` or `page_type` is an ordinary
+  attribute.
+
+**Repeated calls are safe.** Lifecycle callbacks such as `onResume` or a `LaunchedEffect` can fire again
+while the user stays on the same page (a dismissed dialog, a configuration change). Reporting the page
+that is already current, with unchanged attributes, continues the existing visit; only a different name
+or different attributes starts a new one.
+
+**When to call `trackNavigation()`:**
+- The user enters a different page (not when moving between views of the same page), including when
+  Back returns to one
+- Modal or bottom sheet presentations that are a page of their own
+- Tab switches that represent distinct pages
+- Web steps inside a WebView (see [Web steps as pages](#web-steps-as-pages))
+- Deep link handling
+
+When a call starts a new visit, it appears in the session timeline and the events that follow (taps,
+errors, network requests, tracked events) are associated with it.
 
 ### Jetpack Navigation (Compose)
 
-Drop the `NoibuNavigationTracking` composable into the scope that hosts your `NavHost`; every page
-boundary is derived from the `NavController`, with no per-screen calls:
+Drop the `NoibuNavigationTracking` composable into the scope that hosts your `NavHost`. It keeps replay
+transitions clean (and holds events a new destination tracks until its `trackNavigation()` call); it
+does not report pages:
 
 ```kotlin
 import com.noibu.mobile.sessionreplay.compose.NoibuNavigationTracking
 
 val navController = rememberNavController()
-
 NoibuNavigationTracking(navController)
 
 NavHost(navController = navController, startDestination = "home") {
@@ -192,39 +338,64 @@ NavHost(navController = navController, startDestination = "home") {
 }
 ```
 
-A destination's page name defaults to its route; pass a `pageName` lambda to map it yourself.
+Report each destination from a `LaunchedEffect(entry)` inside its `composable { entry -> … }` block.
 
-### Automatic Activity/Fragment Tracking
+### Naming your pages
 
-Activity/Fragment apps can opt into a page per resumed screen with `autoTrackNavigation = true` in
-the config, instead of calling anything per screen.
+| Screen | `screenName` | `pageType` | Example attributes |
+|---|---|---|---|
+| Home | `Home` | `Home` | — |
+| Category listing | `Product List` | `Collection` | `category`, `subcategory` |
+| Search results | `Search` | `Search` | `query` |
+| Product detail | `Product Detail` | `Product` | `category`, `productType`, `productId` |
+| Cart | `Cart` | `Cart` | — |
+| Checkout | `Checkout` | `Checkout` | `step` |
+| Order confirmation | `Order Confirmed` | — | `orderId` |
+| Sign in | `Login` | `Login` | — |
 
-### Manual Page Tracking
+- **Template, not content:** every product detail is `Product Detail`; ids and user data never go in
+  the name.
+- **Hierarchy and ids go in attributes** (`Product Detail` + `category`, not
+  `Product Detail - Clothing - Tops`).
+- **Attributes identify the visit:** the same name with different attributes starts a new visit.
+  `null` is a value: `"size" to null` and no `size` key are different visits.
+  Every view of a page reports the same attributes; transient state (selected size, scroll position)
+  stays out.
+- **Small and stable:** well under 100 names, unchanged between releases. Reserved names (`None`,
+  `Page Check`, `External traffic`, `Exit`, `Other pages`, `No Page Group`, `All`) are sent without a group.
 
-For custom navigation flows or single-Activity architectures, call `trackNavigation()` from the
-newly-shown screen (e.g. each `Fragment.onResume`):
+### What happens without a call
 
-```kotlin
-// With a page name
-SessionReplaySDK.trackNavigation("ProductDetails")
+The SDK opens a page on its own when there is no call to take it:
 
-// Without a page name (uses the default)
-SessionReplaySDK.trackNavigation()
-```
+- **On a fresh start** (no previous screen), events, errors and replay land on an unnamed `view/<uuid>`
+  page with no group until the first call. If the app reports its first screen within 2 seconds, or
+  before any replay frame is captured, that screen takes the page over; otherwise the placeholder is
+  sent as a visit of its own.
+- **On a return from background, a relaunch or a new session**, the next page copies the previous
+  screen's name, group, attributes and title.
+- **An app that never calls `trackNavigation`** still records sessions, made of `view/<uuid>` pages.
 
-**When to call `trackNavigation()`:**
-- Navigation to a new screen in a single-Activity app
-- Modal or bottom sheet presentations
-- Tab switches that represent distinct pages
-- Deep link handling
+### Migrating from 1.x
 
-**What happens:**
-1. Pending replay data is flushed for the current page
-2. A new full snapshot is captured
-3. Replay state is reset for fresh transformation
-4. A new page visit is created in analytics
+| 1.x | 2.0 |
+|---|---|
+| `SessionReplaySDK.trackNavigation(pageName)` / `trackNavigation()` | `trackNavigation(screenName, attributes)` |
+| `autoTrackNavigation = true` (a page per resumed Activity/Fragment) | Removed — call `trackNavigation` from each screen's `onResume` |
+| `NoibuNavigationTracking(navController, pageName = …)` | `NoibuNavigationTracking(navController)` + `trackNavigation` from each destination |
+
+Apps that relied on automatic tracking must now call `trackNavigation` on every page; the
+`NoibuNavigationTracking` install line now only keeps transitions clean.
 
 ---
+
+### Bottom tab bars in page analysis
+
+Page analysis pins the screen's bottom bar to the bottom of the snapshot while the rest of the page
+expands. The SDK recognises Material's `BottomNavigationView`, `NavigationBarView` and `BottomAppBar`,
+and any custom view whose class name contains `TabBar`, `BottomNavigation`, `NavigationBar` or
+`BottomAppBar`. A framework that keeps the role elsewhere (React Native's `accessibilityRole`) names it
+through `SessionReplaySDK.registerRoleHintResolver`.
 
 ## 6. Error Reporting
 
@@ -269,6 +440,10 @@ The Throwable overload automatically extracts the message and stack trace.
 ## 7. Network Monitoring
 
 The SDK provides an OkHttp interceptor to automatically capture HTTP request and response data.
+Capture is OkHttp-only: traffic that does not go through an instrumented `OkHttpClient`
+(`HttpURLConnection`, other HTTP stacks) is not recorded. Every captured request is reported as
+first-party, and there is no URL ignore list — route traffic you do not want captured through a
+client built without the interceptor.
 
 ### Setup
 
@@ -296,7 +471,8 @@ WebSocket connections are not reported as requests — a WebSocket has no respon
 open long after it opens, and a socket that reconnects would report a failed request for every
 attempt. The interceptor is also safe to install before `SessionReplaySDK.initialize`, and to leave
 in place after `shutdown()`: it passes a request straight through, without reading headers or bodies,
-while capture is off or `trackNetwork` is off.
+while capture is off or `trackNetwork` is off. `installNetworkInstrumentation()` is idempotent — a
+builder derived from an instrumented client (`client.newBuilder()`) keeps its single interceptor.
 
 ### Privacy
 
@@ -304,9 +480,16 @@ The following headers are automatically redacted:
 
 `authorization`, `cookie`, `set-cookie`, `x-auth-token`, `x-api-key`, `proxy-authorization`, `x-forwarded-for`
 
-Bodies and the remaining header values are PII-redacted before they reach the device cache: JSON
-values under sensitive key names (`password`, `email`, `cardNumber`, `address`, …) are replaced
-with `******`, then credit-card, email, SSN/SIN and phone patterns are scrubbed from the text.
+Bodies and the remaining header values are PII-redacted before they reach the device cache. In a
+JSON body, the value of any sensitive field is replaced with `******`, at any nesting depth:
+
+| Match | Field names |
+|-------|-------------|
+| Exact (case-insensitive) | `firstname`, `lastname`, `fullname`, `street`, `city`, `town`, `county`, `postcode`, `zipcode`, `cc`, `cardtype`, `cardnumber`, `creditcard`, `email` |
+| Contains | `password`, `address`, `credit`, `postal`, `token`, `phone`, `mobile`, `expiry`, `account`, `email` |
+
+Then, in any text (JSON or not, headers included), card numbers (Visa, MasterCard, Amex, Diners Club,
+Discover, JCB), email addresses, US SSNs, Canadian SINs and phone numbers are replaced with `******`.
 
 ### Advanced Configuration
 
@@ -327,6 +510,10 @@ When `captureHttpData` is `false`, only request/response metadata (method, URL, 
 ## 8. WebView Support
 
 The Noibu SDK can capture session replay data from WebViews, rendering webview content as part of the same mobile session recording. The SDK automatically injects a DOM recorder into the WebView — no additional setup is required on the web page.
+
+One injected script captures the page's replay, its clicks, its JavaScript errors and its HTTP calls.
+It opens no page: all of it lands on the current page, including after a navigation inside the WebView
+(see [Web steps as pages](#web-steps-as-pages)).
 
 ### Prerequisites
 
@@ -376,10 +563,12 @@ AndroidView(
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `webView` | `WebView` | **Yes** | - | The WebView instance to track |
+| `onRouteChange` | `((String) -> Unit)?` | No | `null` | Called with the new route's `path?query`; see [Web steps as pages](#web-steps-as-pages) |
 
 ### How It Works
 
-1. The SDK injects a DOM recorder into every page loaded in the WebView
+1. The SDK installs a DOM recorder as a document-start script, so it runs on every page the WebView
+   loads — including in-page navigations — and survives a later `webViewClient` assignment
 2. DOM snapshots and mutations are captured and routed through a native bridge
 3. Replay records are enriched with a `slotId` that links them to the native WebView container
 4. Records are written directly to the replay outbox and sent alongside native snapshots
@@ -392,10 +581,50 @@ AndroidView(
 the whole app, set `trackWebViews = false` in the config — `enable()` then becomes a no-op and
 nothing is injected into any webview.
 
+### Web steps as pages
+
+To see each step of a web flow as its own page, report every step with `trackNavigation` under the
+hosting screen's name, with the step's path as an attribute: the hosting screen reports the document
+the WebView loads first, and `onRouteChange` reports each later one.
+
+```kotlin
+// path?query of the document the WebView loads first
+private var webPath = "/checkout"
+
+override fun onResume() {
+    super.onResume()
+    SessionReplaySDK.trackNavigation("Checkout", mapOf("path" to webPath))
+}
+
+// after creating the WebView, before loadUrl()
+WebViewTracking.enable(webView, onRouteChange = { path ->
+    webPath = path
+    SessionReplaySDK.trackNavigation("Checkout", mapOf("path" to path))
+})
+webView.loadUrl("https://shop.example.com/checkout")
+```
+
+The hosting screen's first `path` is the key `onRouteChange` would use for that URL: its path and
+query, with the fragment dropped and an empty path as `/` (`https://shop.example.com/checkout?step=1#top`
+→ `/checkout?step=1`). For an inline document (`loadDataWithBaseURL`),
+use its base URL (`https://example.com/` → `/`).
+
+The SDK calls `onRouteChange` on the main thread with the new route's `path?query` (the fragment is
+ignored) each time the page moves to a different one, through the browser history or a new document. It
+skips the document the WebView loads first, which the hosting screen reports, and opens no page itself.
+
+Returning to the first document later comes through `onRouteChange` with that same `path`.
+
+When the hosting screen reports itself again (`onResume`), it reports the step it is on — the last
+`path`, starting from the first document's — so the current visit continues.
+
 ### Important Notes
 
-- Call `enable()` **before** loading any URL in the WebView
+- Call `enable()` **before** the first `loadUrl()` so the first page is recorded from its start; a
+  page already loaded when `enable()` runs is recorded from its next navigation
 - Call `enable()` **after** `SessionReplaySDK.initialize()` — the SDK must be running
+- `enable()` is idempotent: calling it again for the same WebView (e.g. on every Compose
+  recomposition) is ignored rather than recording the page twice
 - Each WebView instance gets a unique `slotId` so multiple WebViews in the same screen are tracked independently
 - WebView replay data is associated with the current native page view — report the navigation before presenting a new screen with a WebView
 
@@ -403,7 +632,10 @@ nothing is injected into any webview.
 
 ## 9. View Tagging
 
-For Jetpack Compose apps, use the `noibuTag` modifier to add semantic identifiers to UI elements for tap/click action tracking.
+Most Compose elements need no tagging: the SDK derives a stable selector for click tracking from the
+element's own visible text or `contentDescription`. The `noibuTag` modifier overrides that derived
+name. Use it for interactive elements with neither text nor a content description (an icon button, an
+image), to tell repeated rows apart, or to pin a name that survives copy changes.
 
 ### Usage
 
@@ -427,7 +659,11 @@ Button(
 
 ### Automatic Tagging
 
-If you use the Noibu Gradle Plugin (`com.noibu.gradle.plugin`), Compose elements are auto-tagged at compile time. Manual `noibuTag` calls are useful for overriding auto-generated names or tagging elements that the plugin may not reach.
+The [Noibu Gradle Plugin](#2b-gradle-plugin-optional) can also tag clickable composables with their
+function name at compile time — only when `noibu { enableComposeInstrumentation = true }` is set
+(off by default). That auto tag is the lowest-priority identity: an element's text or content
+description wins over it, and a manual `noibuTag` wins over both. It matters only for clickables
+that carry no content of their own.
 
 ---
 
@@ -457,6 +693,83 @@ are ignored; validate in application code if the caller needs immediate feedback
 
 ---
 
+## 10b. Tracking Events
+
+`track(name, data)` reports ecommerce and custom events — the counterpart of NoibuJS's
+`track(name, payload)`. Events appear on the session's timeline and in Explorations.
+
+| Method | Parameters | Description |
+|--------|-----------|-------------|
+| `track(name, data)` | `name: String`, `data: Map<String, Any?>? = null` | Report an event; the map is encoded to JSON for you |
+| `trackJson(name, dataJson)` | `name: String`, `dataJson: String?` | Same, with the payload already JSON-encoded (a `JSONObject.toString()`, for example) |
+
+A `data` map may hold strings, numbers, booleans, `null`, nested maps with `String` keys, lists and
+arrays, plus `JSONObject`/`JSONArray` values. Anything else (a `Date`, an enum, NaN) is rejected with
+`Event payload is not JSON-serializable.` rather than being stringified.
+
+```kotlin
+// A standard ecommerce event: the payload follows the shared ecommerce schema.
+SessionReplaySDK.track("product_added_to_cart", mapOf(
+    "cartLine" to mapOf(
+        "quantity" to 1,
+        "merchandise" to mapOf("id" to "sku-42", "title" to "Running Shoes",
+            "price" to mapOf("amount" to 89.99, "currencyCode" to "USD")),
+    ),
+))
+
+// A custom event: any name, any JSON object.
+val result = SessionReplaySDK.track("promo_banner_dismissed", mapOf("campaign" to "summer"))
+if (!result.success) Log.w("Shop", result.errors.joinToString())
+
+// Already-serialized JSON (e.g. a JSONObject) goes through trackJson.
+SessionReplaySDK.trackJson("cart_viewed", cartJson.toString())
+```
+
+| Rule | Limit |
+|------|-------|
+| Event name length | ≤ 500 characters |
+| Payload | a JSON object (or `null`), ≤ 10,000 characters serialized |
+| Standard payloads | checked against the ecommerce schema; unknown properties dropped, wrong types rejected |
+| Events per page visit | 500 |
+
+`track()` never throws. It returns a `TrackResult`: `success` is `false` when the event was rejected
+and `errors` lists why, in the same words as the web SDK. Before `initialize()` the result is
+`success = false` with `SDK is not initialized.` — the event is not queued.
+
+### Standard ecommerce events
+
+A standard event's payload is validated against the shared ecommerce schema: every field is optional,
+unknown properties are dropped, and a type mismatch is reported in `errors` and the event is not sent.
+Any other event name is a custom event and only has to be a JSON object.
+
+Shared shapes: `Money` is `{ amount, currencyCode }`; a `productVariant` is
+`{ id, sku, title, price: Money, product: { id, title, type, url, vendor } }`; a `cartLine` is
+`{ quantity, merchandise: productVariant, cost: { totalAmount: Money } }`.
+
+| Event name | Payload key | Payload |
+|---|---|---|
+| `product_viewed` | `productVariant` | a product variant |
+| `product_added_to_cart`, `product_removed_from_cart` | `cartLine` | a cart line |
+| `cart_viewed` | `cart` | `{ id, totalQuantity, lines: [cartLine], cost: { totalAmount: Money } }` |
+| `collection_viewed` | `collection` | `{ id, title, productVariants: [productVariant] }` |
+| `search_submitted` | `searchResult` | `{ query, productVariants: [productVariant] }` |
+| `checkout_started`, `checkout_address_info_submitted`, `checkout_contact_info_submitted`, `checkout_shipping_info_submitted`, `payment_info_submitted`, `checkout_completed` | `checkout` | `{ token, currencyCode, subtotalPrice, totalTax, totalPrice, lineItems: [{ id, title, quantity, variant: productVariant, finalLinePrice }], shippingLine: { price }, discountApplications, order: { id, customer: { id, isFirstOrder } }, transactions }` |
+
+### Which page an event lands on
+
+An event is attributed to the page visit that is current when it is tracked, with one allowance for
+screen-view events fired while a screen is opening:
+
+- With the Compose add-on and `NoibuNavigationTracking`, events tracked between a destination change
+  and the `trackNavigation()` that follows it are held (up to three seconds) and land on the screen
+  being entered, so `track("product_viewed", …)` from a `LaunchedEffect` is attributed correctly.
+- With Fragments, call `trackNavigation()` in `onResume` before the screen's own events (LiveData
+  observers deliver on `onStart`, before `onResume`).
+- Off the main thread, `track()` is ordered behind a `trackNavigation()` already on its way to the main
+  thread, so calling the two in sequence from a background thread keeps the event on the new page.
+
+---
+
 ## 11. Privacy & Security
 
 ### Privacy Mode Selection
@@ -475,6 +788,9 @@ privacyMode = PrivacyMode.ALLOW_ALL
 Typed input content never reaches the pipeline in any mode: the walker replaces it with the field's
 hint (or `***`) as it walks, before an event is built. `MASK_ALL` additionally masks the hint.
 
+`privacyMode` is global — there is no per-view masking API on Android. Input values are always
+masked; the mode only decides how much displayed text is redacted.
+
 ### Data Storage
 
 - Session data is streamed to Noibu's servers
@@ -489,7 +805,9 @@ hint (or `***`) as it walks, before an event is built. `MASK_ALL` additionally m
 
 The SDK automatically handles app lifecycle:
 - **App goes to background**: Pending data is flushed
-- **App returns after 30+ seconds**: A new page view is started automatically
+- **App returns after 15+ minutes in the background**: A new session starts. The page is not
+  changed by a return to the foreground — a shorter background stay resumes the same session and
+  page.
 
 ### Checking Initialization Status
 
@@ -535,8 +853,10 @@ adb logcat | grep -i noibu
 | Compose screens not captured | Ensure the `session-replay-compose` dependency is added and `NoibuComposeExtension` is passed to `initialize()` |
 | Network requests not captured | Ensure `installNetworkInstrumentation()` is called on your `OkHttpClient.Builder` |
 | Errors not appearing | Verify `addError()` is called after `initialize()` |
-| Pages not splitting | Wire exactly one navigation source — `NoibuNavigationTracking`, `autoTrackNavigation = true`, or `trackNavigation()` (see [Page Navigation](#5-page-navigation)) |
+| Pages not splitting | Call `trackNavigation()` from every screen (see [Pages](#5-pages-tracknavigation)) |
 | WebView content not in replay | Verify `WebViewTracking.enable()` runs after `initialize()` and before the URL loads, and that `trackWebViews` is left on |
+| `track()` answers `SDK is not initialized.` | Call `track()` after `initialize()`; events tracked before it are not queued |
+| Custom fonts render as a default font in replay | Apply the [Gradle plugin](#2b-gradle-plugin-optional) with `enableFontCapture` left on |
 
 ---
 
